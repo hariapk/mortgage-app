@@ -1,273 +1,272 @@
 import streamlit as st
-import pandas as pd
 import numpy as np
-import io
-import matplotlib.pyplot as plt
+import pandas as pd
+import altair as alt
+from io import BytesIO
 
-# ------------------------------
-# Currency formatting (US)
-# ------------------------------
+# -----------------------------
+# USD formatting
+# -----------------------------
 def fmt(x):
     return f"${x:,.2f}"
 
-# ------------------------------
-# Excel Export (Corrected)
-# ------------------------------
-def to_excel_bytes(df, sheet_name="Sheet1"):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
-    return output.getvalue()
 
-# ------------------------------
-# Amortization Calculator
-# ------------------------------
-def amortization_table(principal, annual_rate, months, extra_payment=0):
+# -----------------------------
+# EMI calculation
+# -----------------------------
+def calculate_emi(principal, annual_rate, months):
     monthly_rate = annual_rate / 12 / 100
     if monthly_rate == 0:
-        emi = principal / months
-    else:
-        emi = principal * (monthly_rate * (1 + monthly_rate)**months) / ((1 + monthly_rate)**months - 1)
+        return principal / months
+    emi = principal * monthly_rate * (1 + monthly_rate) ** months / ((1 + monthly_rate) ** months - 1)
+    return emi
 
-    emi = float(emi)
-    data = []
+
+# -----------------------------
+# Amortization table
+# -----------------------------
+def amortization_table(principal, annual_rate, months, extra_payment=0):
+    monthly_rate = annual_rate / 12 / 100
+    emi = calculate_emi(principal, annual_rate, months)
     balance = principal
+
+    data = []
     month = 1
 
-    while balance > 0:
+    while balance > 0 and month <= 2000:
         interest = balance * monthly_rate
         principal_component = emi - interest + extra_payment
 
         if principal_component > balance:
             principal_component = balance
-            emi_final = interest + principal_component
+            payment = interest + balance
         else:
-            emi_final = emi + extra_payment
+            payment = emi + extra_payment
 
         balance -= principal_component
 
         data.append([
             month,
-            emi_final,
+            payment,
             interest,
             principal_component,
             max(balance, 0)
         ])
-
         month += 1
 
-    df = pd.DataFrame(data, columns=["Month", "EMI", "Interest", "Principal", "Balance"])
-    return df, emi
+    df = pd.DataFrame(data, columns=["Month", "Payment", "Interest", "Principal", "Balance"])
+    return df
 
-# ------------------------------
-# Yearly Summary
-# ------------------------------
+
+# -----------------------------
+# Excel Export
+# -----------------------------
+def to_excel(df, sheet="Sheet1"):
+    output = BytesIO()
+    writer = pd.ExcelWriter(output, engine="openpyxl")
+    df.to_excel(writer, index=False, sheet_name=sheet)
+    writer.close()
+    output.seek(0)
+    return output.read()
+
+
+# -----------------------------
+# Yearly summary
+# -----------------------------
 def yearly_summary(df):
-    df["Year"] = ((df["Month"] - 1) // 12) + 1
-    return df.groupby("Year")[["EMI", "Interest", "Principal"]].sum().reset_index()
+    df["Year"] = (df["Month"] - 1) // 12 + 1
+    return df.groupby("Year").agg({
+        "Payment": "sum",
+        "Interest": "sum",
+        "Principal": "sum",
+        "Balance": "last"
+    }).reset_index()
 
-# ------------------------------
-# Streamlit Settings
-# ------------------------------
-st.set_page_config(
-    page_title="Mortgage Planner",
-    layout="wide",
-    page_icon="🏡",
-)
 
-# ------------------------------
-# Custom Beautiful CSS
-# ------------------------------
+# -----------------------------
+# STREAMLIT PREMIUM FINTECH UI
+# -----------------------------
+st.set_page_config(page_title="Mortgage Planner (USD)", layout="wide")
+
+# Custom fintech CSS
 st.markdown("""
 <style>
-/* Main page background */
-[data-testid="stAppViewContainer"] {
-    background: #f4f7fb;
+body {
+    font-family: 'Inter', sans-serif;
 }
-
-/* Header */
-h1 {
-    color: #2c3e50;
-    font-weight: 700;
+.main-title {
+    font-size: 42px;
+    font-weight: 800;
+    background: linear-gradient(90deg, #005bea 0%, #00c6fb 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
-
-/* Cards */
-.metric-card {
-    background: white;
-    padding: 20px;
-    border-radius: 14px;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-    text-align: center;
-    margin-bottom: 15px;
+.sub-text {
+    font-size: 18px;
+    color: #6b7280;
 }
-.metric-card h3 {
-    margin: 0;
-    color: #34495e;
+.fin-card {
+    padding: 25px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.65);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(200, 200, 200, 0.35);
+    box-shadow: 0px 4px 10px rgba(0,0,0,0.08);
+    transition: transform .15s ease;
+}
+.fin-card:hover {
+    transform: translateY(-4px);
+}
+.metric-label {
+    font-size: 15px;
+    color: #6b7280;
 }
 .metric-value {
-    font-size: 26px;
+    font-size: 30px;
     font-weight: 700;
-    color: #2c7be5;
+    margin-top: 4px;
 }
-.metric-sub {
-    font-size: 14px;
-    color: #7f8c8d;
+.section-title {
+    font-size: 28px;
+    font-weight: 700;
+    margin-top: 20px;
+    margin-bottom: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ------------------------------
-# Title
-# ------------------------------
-st.title("🏡 Mortgage Payment Planner")
-st.write("A clean, modern dashboard to calculate mortgage schedules, savings, and more.")
+# -----------------------------
+# HEADER
+# -----------------------------
+st.markdown("<div class='main-title'>🏦 Mortgage Planner (USD)</div>", unsafe_allow_html=True)
+st.markdown("<div class='sub-text'>A premium, interactive mortgage payoff simulator with extra payments, charts, and tax benefits.</div>", unsafe_allow_html=True)
+st.markdown("---")
 
-# ------------------------------
-# Input Section
-# ------------------------------
-st.subheader("🔧 Inputs")
+# -----------------------------
+# INPUT AREA
+# -----------------------------
+left, right = st.columns(2)
 
-col1, col2, col3 = st.columns(3)
+with left:
+    principal = st.number_input("🏠 Remaining Loan Amount ($)", value=350000.0, step=1000.0)
+    rate = st.number_input("📈 Annual Interest Rate (%)", value=6.5, step=0.1)
 
-with col1:
-    principal = st.number_input("Remaining Loan Amount (USD)", value=300000.0, min_value=0.0, step=1000.0)
+with right:
+    years = st.number_input("⏳ Remaining Tenure (Years)", value=25, step=1)
+    extra = st.number_input("💡 Extra Monthly Payment (Optional)", value=0.0, step=50.0)
 
-with col2:
-    annual_rate = st.number_input("Annual Interest Rate (%)", value=6.5, min_value=0.0, step=0.1)
+tax_rate = st.number_input("💸 Tax Savings Rate (%)", value=30.0, step=1.0)
 
-with col3:
-    tenure_years = st.number_input("Remaining Tenure (Years)", value=30, min_value=1, step=1)
+months = int(years * 12)
 
-extra_payment = st.number_input("Extra Monthly Payment (optional)", value=0.0, min_value=0.0, step=50.0)
-tax_rate = st.number_input("Tax Benefit on Interest (%)", value=30.0)
+# -----------------------------
+# COMPUTATION
+# -----------------------------
+df_orig = amortization_table(principal, rate, months, extra_payment=0)
+df_extra = amortization_table(principal, rate, months, extra_payment=extra)
 
-months = int(tenure_years * 12)
+emi = calculate_emi(principal, rate, months)
+total_interest = df_orig["Interest"].sum()
+tax_benefit = total_interest * (tax_rate / 100)
 
-# ------------------------------
-# Calculate Tables
-# ------------------------------
-df_original, emi_original = amortization_table(principal, annual_rate, months, extra_payment=0)
-total_interest_original = df_original["Interest"].sum()
-tax_saved_original = total_interest_original * (tax_rate / 100)
+extra_months_saved = len(df_orig) - len(df_extra)
+interest_saved = df_orig["Interest"].sum() - df_extra["Interest"].sum()
 
-if extra_payment > 0:
-    df_extra, emi_extra = amortization_table(principal, annual_rate, months, extra_payment)
-    total_interest_extra = df_extra["Interest"].sum()
-    interest_saved = total_interest_original - total_interest_extra
-    months_saved = len(df_original) - len(df_extra)
+# -----------------------------
+# SUMMARY CARDS
+# -----------------------------
+c1, c2, c3, c4 = st.columns(4)
 
-# ------------------------------
-# Summary Cards (Beautiful)
-# ------------------------------
-st.subheader("📊 Summary Overview")
-
-card1, card2, card3, card4 = st.columns(4)
-
-with card1:
+with c1:
     st.markdown(f"""
-    <div class="metric-card">
-        <h3>Monthly EMI</h3>
-        <div class="metric-value">{fmt(emi_original)}</div>
+    <div class='fin-card'>
+        <div class='metric-label'>Monthly EMI</div>
+        <div class='metric-value'>{fmt(emi)}</div>
     </div>
     """, unsafe_allow_html=True)
 
-with card2:
+with c2:
     st.markdown(f"""
-    <div class="metric-card">
-        <h3>Total Interest (Original)</h3>
-        <div class="metric-value">{fmt(total_interest_original)}</div>
+    <div class='fin-card'>
+        <div class='metric-label'>Total Interest</div>
+        <div class='metric-value'>{fmt(total_interest)}</div>
     </div>
     """, unsafe_allow_html=True)
 
-with card3:
+with c3:
     st.markdown(f"""
-    <div class="metric-card">
-        <h3>Tax Savings</h3>
-        <div class="metric-value">{fmt(tax_saved_original)}</div>
+    <div class='fin-card'>
+        <div class='metric-label'>Tax Benefit</div>
+        <div class='metric-value'>{fmt(tax_benefit)}</div>
     </div>
     """, unsafe_allow_html=True)
 
-with card4:
+with c4:
     st.markdown(f"""
-    <div class="metric-card">
-        <h3>Loan Duration</h3>
-        <div class="metric-value">{len(df_original)} months</div>
-        <div class="metric-sub">({len(df_original)/12:.1f} years)</div>
+    <div class='fin-card'>
+        <div class='metric-label'>Loan Ends In</div>
+        <div class='metric-value'>{len(df_orig)//12} yrs</div>
     </div>
     """, unsafe_allow_html=True)
 
-# ------------------------------
-# Extra Payment Comparison
-# ------------------------------
-if extra_payment > 0:
-    st.subheader("⚡ Extra Payment Impact")
+st.markdown("---")
 
-    c1, c2, c3 = st.columns(3)
+# -----------------------------
+# EXTRA PAYMENT IMPACT
+# -----------------------------
+if extra > 0:
+    st.markdown("<div class='section-title'>🔥 Extra Payment Impact</div>", unsafe_allow_html=True)
 
-    with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>New Duration</h3>
-            <div class="metric-value">{len(df_extra)} months</div>
-            <div class="metric-sub">({len(df_extra)/12:.1f} years)</div>
-        </div>
-        """, unsafe_allow_html=True)
+    a, b, c = st.columns(3)
 
-    with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Months Saved</h3>
-            <div class="metric-value">{months_saved}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    with a:
+        st.metric("New Monthly Payment", fmt(emi + extra))
 
-    with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h3>Interest Saved</h3>
-            <div class="metric-value">{fmt(interest_saved)}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    with b:
+        st.metric("Interest Saved", fmt(interest_saved))
 
-# ------------------------------
-# Chart
-# ------------------------------
-st.subheader("📉 Balance Reduction Over Time")
+    with c:
+        st.metric("Months Saved", extra_months_saved)
 
-fig, ax = plt.subplots(figsize=(10, 4))
-ax.plot(df_original["Month"], df_original["Balance"], label="Original", linewidth=2)
+    # Chart
+    comp = pd.DataFrame({
+        "Month": df_orig["Month"],
+        "Original": df_orig["Balance"],
+    })
+    comp = comp.merge(
+        df_extra[["Month", "Balance"]].rename(columns={"Balance": "Extra Payment"}),
+        on="Month", how="left"
+    ).melt("Month", var_name="Type", value_name="Balance")
 
-if extra_payment > 0:
-    ax.plot(df_extra["Month"], df_extra["Balance"], label="With Extra Payment", linewidth=2)
+    chart = alt.Chart(comp).mark_line().encode(
+        x="Month",
+        y=alt.Y("Balance", title="Remaining Balance ($)"),
+        color="Type"
+    ).properties(height=400)
 
-ax.set_xlabel("Month")
-ax.set_ylabel("Balance (USD)")
-ax.legend()
-ax.grid(alpha=0.3)
+    st.altair_chart(chart, use_container_width=True)
 
-st.pyplot(fig)
+st.markdown("---")
 
-# ------------------------------
-# Tables
-# ------------------------------
-st.subheader("📄 Amortization Table")
-df_show = df_extra if extra_payment > 0 else df_original
-st.dataframe(df_show, height=380)
+# -----------------------------
+# TABLES + DOWNLOADS
+# -----------------------------
+tab1, tab2, tab3 = st.tabs(["📊 Amortization Table", "📅 Yearly Summary", "📥 Downloads"])
 
-st.subheader("📘 Yearly Summary")
-st.dataframe(yearly_summary(df_show))
+with tab1:
+    st.dataframe(df_orig, use_container_width=True)
 
-# ------------------------------
-# Downloads
-# ------------------------------
-st.subheader("⬇️ Download Data")
+with tab2:
+    st.dataframe(yearly_summary(df_orig), use_container_width=True)
 
-colX, colY = st.columns(2)
-
-with colX:
-    csv = df_show.to_csv(index=False).encode()
-    st.download_button("Download CSV", csv, "amortization.csv", "text/csv")
-
-with colY:
-    excel_bytes = to_excel_bytes(df_show, sheet_name="Amortization")
-    st.download_button("Download Excel", excel_bytes, "amortization.xlsx", "application/vnd.ms-excel")
+with tab3:
+    st.download_button(
+        "Download Amortization (Excel)",
+        data=to_excel(df_orig),
+        file_name="amortization.xlsx"
+    )
+    st.download_button(
+        "Download Amortization (CSV)",
+        df_orig.to_csv(index=False),
+        file_name="amortization.csv"
+    )
