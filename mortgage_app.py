@@ -12,7 +12,7 @@ if "initialized" not in st.session_state:
     st.session_state["lump_events"] = []  # list of {"amount": float, "month": int}
     st.session_state["initialized"] = True
 
-st.set_page_config(page_title="Mortgage vs Invest Planner (2025) — Multiple Lump Sums + PV", layout="wide", page_icon="🏦")
+st.set_page_config(page_title="Mortgage vs Invest Planner (2025) — Multiple Lump Sums + PV + MID Cap", layout="wide", page_icon="🏦")
 
 # ---------------------------
 # Helpers / formatters / io
@@ -34,6 +34,11 @@ def to_excel_bytes(df, sheet_name="Sheet1"):
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
     return out.getvalue()
+
+# ---------------------------
+# Constants: MID cap (loan orig >= Dec 16, 2017) -> $750,000 for joint filers
+# ---------------------------
+MID_CAP_DEFAULT = 750000.0  # as per 2017 change (applies to loans originated on or after Dec 16, 2017)
 
 # ---------------------------
 # 2025 standard deductions (final)
@@ -179,7 +184,7 @@ def apply_multiple_lumps_and_resimulate(P, annual_rate_pct, n_months, lumps, ext
         principal_base = base_emi - interest
         if principal_base < 0:
             principal_base = 0.0
-        extra = 0.0  # we'll apply recurring extra after all lumps if provided (extra_monthly applied after lumps in this model)
+        extra = 0.0
         # regular payment
         if principal_base >= balance:
             principal_paid = balance
@@ -199,7 +204,7 @@ def apply_multiple_lumps_and_resimulate(P, annual_rate_pct, n_months, lumps, ext
             # if loan paid off by lump
             if balance <= 0.005:
                 month += 1
-                rows.append([month, 0.0, 0.0, round(0.0,2), round(0.0,2), round(0.0,2), round(0.0,2)])
+                rows.append([month, 0.0, 0.0, round(0.0,2), round(0.0,2), round(0.0,2), round(balance,2)])
                 break
     # continue amortization with extra_monthly if still outstanding
     if balance > 0.005 and month < cap:
@@ -226,16 +231,6 @@ def apply_multiple_lumps_and_resimulate(P, annual_rate_pct, n_months, lumps, ext
 # Investment simulation: multiple lumps + monthly invest
 # ---------------------------
 def simulate_investment_multiple_lumps(lump_events, monthly_invest, annual_return_pct, invest_months):
-    """
-    lump_events: list of {"amount":float, "month":int}
-    monthly_invest: monthly contribution amount (applied at end of month, starting at the earliest lump month if lumps exist, else start at month 1)
-    annual_return_pct: percent
-    invest_months: total months to simulate
-    Returns final balance at invest_months.
-    Assumptions:
-    - Each lump event is invested at the END of its specified month (so it grows starting next period).
-    - Monthly contributions are added at end of each month starting at first_lump_month (if lumps exist) else month 1.
-    """
     r_month = (1 + annual_return_pct/100.0) ** (1/12.0) - 1.0
     balance = 0.0
     if lump_events:
@@ -250,12 +245,9 @@ def simulate_investment_multiple_lumps(lump_events, monthly_invest, annual_retur
         lumps_by_month.setdefault(m, 0.0)
         lumps_by_month[m] += float(e["amount"])
     for m in range(1, invest_months + 1):
-        # grow
         balance = balance * (1 + r_month)
-        # add any lump scheduled this month
         if m in lumps_by_month and m <= invest_months:
             balance += lumps_by_month[m]
-        # add monthly invest if month >= start_monthly
         if monthly_invest > 0 and m >= start_monthly:
             balance += monthly_invest
     return balance
@@ -306,7 +298,6 @@ with left_col:
 
     st.markdown("---")
     st.markdown("## Investment inputs (multiple lumps supported)")
-    # Inputs for adding a new lump event
     new_lump_amount = st.number_input("New lump amount ($)", value=20000.0, step=100.0, format="%.2f", key="new_lump_amount")
     new_lump_month = st.number_input("New lump month (1 = now)", value=5, min_value=1, step=1, key="new_lump_month")
     col_add1, col_add2 = st.columns([1,1])
@@ -336,7 +327,7 @@ with left_col:
     invest_horizon_years = st.number_input("Investment horizon (years)", value=10, min_value=1, step=1)
 
 with right_col:
-    st.title("Mortgage — Analysis and Comparison (Multiple Lump Sums)")
+    st.title("Mortgage — Analysis and Comparison (Multiple Lump Sums + MID cap)")
 
     months = int(max(1, round(remaining_years * 12)))
     # Base schedule (no extra, no lumps)
@@ -368,8 +359,63 @@ with right_col:
 
     # Tax calculations
     annual_property_tax = home_price * property_tax_rate
-    tax_savings_base, fed_s_base, st_s_base = compute_annual_tax_savings(first_year_interest_base, income, filing_status, num_dependents, include_state, annual_property_tax, salt_cap)
-    tax_savings_lump, fed_s_lump, st_s_lump = compute_annual_tax_savings(first_year_interest_lump, income, filing_status, num_dependents, include_state, annual_property_tax, salt_cap)
+
+    # ---------------------------
+    # NEW: Apply MID cap prorating for deductible first-year interest
+    # Strategy:
+    # - Estimate average outstanding principal over months 1..12 using month-start balances.
+    # - If average_balance > MID_CAP_DEFAULT then prorate deductible interest by factor = MID_CAP_DEFAULT / average_balance
+    # - Use that deductible interest in the tax calculations.
+    # ---------------------------
+    def compute_first_year_avg_start_balance(df_sched, starting_principal):
+        """Approximate average starting balance for months 1..12."""
+        starts = []
+        for m in range(1, 13):
+            if m == 1:
+                starts.append(starting_principal)
+            else:
+                # start of month m is end balance of month m-1 if exists
+                prev = df_sched.loc[df_sched["Month"] == (m - 1)]
+                if not prev.empty:
+                    starts.append(float(prev["Balance"].values[0]))
+                else:
+                    # schedule ended before this month
+                    starts.append(0.0)
+        # consider only positive starts
+        arr = np.array(starts)
+        arr = arr[arr > 0]
+        if arr.size == 0:
+            return 0.0
+        return float(arr.mean())
+
+    avg_balance_base = compute_first_year_avg_start_balance(df_base, remaining_loan)
+    avg_balance_lump = compute_first_year_avg_start_balance(df_lump, remaining_loan)
+
+    # compute cap factors
+    cap = MID_CAP_DEFAULT  # using user's choice A: loan orig on/after Dec 16, 2017
+    cap_factor_base = 1.0
+    cap_factor_lump = 1.0
+    cap_applied_base = False
+    cap_applied_lump = False
+    if avg_balance_base > 0 and avg_balance_base > cap:
+        cap_factor_base = cap / avg_balance_base
+        cap_applied_base = True
+    if avg_balance_lump > 0 and avg_balance_lump > cap:
+        cap_factor_lump = cap / avg_balance_lump
+        cap_applied_lump = True
+
+    deductible_first_year_interest_base = first_year_interest_base * cap_factor_base
+    deductible_first_year_interest_lump = first_year_interest_lump * cap_factor_lump
+
+    # For UI clarity round
+    deductible_first_year_interest_base = float(round(deductible_first_year_interest_base, 2))
+    deductible_first_year_interest_lump = float(round(deductible_first_year_interest_lump, 2))
+
+    # For base (original) tax savings using deductible interest
+    tax_savings_base, fed_s_base, st_s_base = compute_annual_tax_savings(deductible_first_year_interest_base, income, filing_status, num_dependents, include_state, annual_property_tax, salt_cap)
+    # For lump scenario, compute tax savings using deductible first-year interest
+    tax_savings_lump, fed_s_lump, st_s_lump = compute_annual_tax_savings(deductible_first_year_interest_lump, income, filing_status, num_dependents, include_state, annual_property_tax, salt_cap)
+
     lost_tax_savings_due_to_lumps = max(0.0, tax_savings_base - tax_savings_lump)
 
     # Investment FV simulation (multiple lumps invested instead)
@@ -380,7 +426,7 @@ with right_col:
     # Net FV-based heuristic
     net_mortgage_benefit = interest_saved_by_lump - lost_tax_savings_due_to_lumps
 
-    # Effective APR after tax (first-year)
+    # Effective APR after tax (first-year) — use tax savings based on deductible interest (i.e., tax_savings_base)
     effective_first_year_interest_base = first_year_interest_base - tax_savings_base
     effective_rate_base_pct = (effective_first_year_interest_base / remaining_loan) * 100.0 if remaining_loan > 0 else 0.0
     effective_first_year_interest_lump = first_year_interest_lump - tax_savings_lump
@@ -425,8 +471,9 @@ with right_col:
         st.write(fmt_usd(annual_property_tax))
     with c3:
         st.metric("Annual tax savings (base estimate)", fmt_usd(tax_savings_base))
-        st.write("Deduction used")
-        st.write("Itemized" if (first_year_interest_base + min(annual_property_tax, salt_cap)) > STANDARD_DEDUCTION_2025[filing_status] else "Standard")
+        # Inline text under Annual tax savings per Option 1:
+        if cap_applied_base:
+            st.write(f"*Mortgage interest deduction capped at ${int(MID_CAP_DEFAULT):,}. Deductible first-year interest used: {fmt_usd(deductible_first_year_interest_base)} (original {fmt_usd(first_year_interest_base)}).*")
     with c4:
         st.metric("Effective mortgage rate (base, 1st yr)", fmt_pct(effective_rate_base_pct))
         st.write("Effective (after lumps)", f"{fmt_pct(effective_rate_lump_pct)} (after lumps)")
@@ -444,6 +491,8 @@ with right_col:
         st.write(f"New payoff: **{months_lump} months** (saved {months_saved_by_lump} months)")
         st.write(f"Total interest with lumps: **{fmt_usd(total_interest_lump)}** (saved {fmt_usd(interest_saved_by_lump)} vs base)")
         st.write(f"Estimated annual tax savings after lumps: **{fmt_usd(tax_savings_lump)}**")
+        if cap_applied_lump:
+            st.write(f"*Mortgage interest deduction capped at ${int(MID_CAP_DEFAULT):,}. Deductible first-year interest used: {fmt_usd(deductible_first_year_interest_lump)} (original {fmt_usd(first_year_interest_lump)}).*")
         st.write(f"Lost annual tax savings vs base: **{fmt_usd(lost_tax_savings_due_to_lumps)}**")
         st.write(f"Net mortgage benefit (FV heuristic): **{fmt_usd(net_mortgage_benefit)}**")
         st.markdown("**PV (discounted)**")
@@ -475,7 +524,7 @@ with right_col:
         st.info(f"(PV) Prepaying outperforms investing by approx {fmt_usd(npv_mortgage_net - pv_invest)} in present value terms.")
 
     st.markdown("---")
-    st.caption("Notes: PV uses expected annual return as discount rate (converted to monthly). Tax treatment is simplified (first-year interest used as deduction proxy; child credit modeled simply). Lump sums are applied AFTER that month's EMI. For precise tax or legal advice consult a professional.")
+    st.caption("Notes: PV uses expected annual return as discount rate (converted to monthly). Mortgage interest deduction cap applied per IRS rules for loans originated on/after Dec 16, 2017 (deduction prorated if average outstanding principal in first year exceeds the $750,000 cap). Tax treatment simplified — consult a tax professional for details.")
 
     # ---------------------------
     # Balance chart
@@ -560,7 +609,9 @@ with right_col:
     st.write(f"Filing status: **{filing_status}**")
     st.write(f"Annual income: **{fmt_usd(income)}**")
     st.write(f"First-year mortgage interest (base): **{fmt_usd(first_year_interest_base)}**")
+    st.write(f"Deductible first-year interest used (after MID cap if applied): **{fmt_usd(deductible_first_year_interest_base)}**")
     st.write(f"First-year mortgage interest (with lumps): **{fmt_usd(first_year_interest_lump)}**")
+    st.write(f"Deductible first-year interest used with lumps: **{fmt_usd(deductible_first_year_interest_lump)}**")
     st.write(f"Estimated annual tax savings (base): **{fmt_usd(tax_savings_base)}**")
     st.write(f"Estimated annual tax savings (with lumps): **{fmt_usd(tax_savings_lump)}**")
     st.write(f"Estimated lost tax savings by prepaying: **{fmt_usd(lost_tax_savings_due_to_lumps)}**")
